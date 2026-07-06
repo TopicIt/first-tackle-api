@@ -1,0 +1,281 @@
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy.orm import Session, joinedload
+
+from app.models.game_save import GameSave
+from app.models.user import User
+
+
+LEADERBOARD_LIMIT = 50
+TROPHY_CATEGORIES = {"trophy", "very_rare", "legendary"}
+
+
+def get_leaderboard(db: Session, board_type: str, *, fish_id: str | None = None) -> dict[str, Any]:
+    normalized_type = normalize_board_type(board_type)
+    saves = load_saves(db)
+
+    if normalized_type == "trophies":
+        rows = trophy_rows(saves)
+    elif normalized_type in {"coins", "total-coins"}:
+      rows = score_rows(saves, "coins")
+    elif normalized_type in {"total-fish", "fish-caught"}:
+      rows = score_rows(saves, "total-fish")
+    elif normalized_type == "by-location":
+      rows = fish_rows(saves)
+    else:
+      rows = fish_rows(saves, fish_id=fish_id)
+
+    ranked_rows = add_ranks(rows[:LEADERBOARD_LIMIT])
+    return {
+        "ok": True,
+        "type": f"species/{fish_id}/biggest" if fish_id else normalized_type,
+        "source": "server-cloud-save",
+        "verified": False,
+        "message": "Server leaderboard aggregated from latest cloud saves; records are not anti-cheat verified yet.",
+        "records": ranked_rows,
+        "rows": ranked_rows,
+    }
+
+
+def normalize_board_type(board_type: str) -> str:
+    aliases = {
+        "biggestFish": "biggest-fish",
+        "biggest": "biggest-fish",
+        "species": "biggest-fish",
+        "coins": "coins",
+        "totalCoins": "coins",
+        "total-fish": "total-fish",
+        "fishCaught": "total-fish",
+        "byLocation": "by-location",
+        "location": "by-location",
+    }
+    return aliases.get(board_type, board_type)
+
+
+def load_saves(db: Session) -> list[GameSave]:
+    return (
+        db.query(GameSave)
+        .options(joinedload(GameSave.user).joinedload(User.profile))
+        .all()
+    )
+
+
+def fish_rows(saves: list[GameSave], *, fish_id: str | None = None) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for save in saves:
+        payload = save.payload_json if isinstance(save.payload_json, dict) else {}
+        player_name = player_name_for_save(save, payload)
+        rows.extend(fish_entry_row(save, player_name, entry) for entry in payload_fish_entries(payload, fish_id=fish_id))
+
+        biggest = payload.get("stats", {}).get("biggestFish")
+        if isinstance(biggest, dict) and (fish_id is None or biggest.get("fishId") == fish_id):
+            rows.append(biggest_fish_row(save, player_name, biggest))
+
+    return sorted(
+        dedupe_rows(rows),
+        key=lambda row: (row.get("weightGrams") or 0, row.get("serverRevision") or 0),
+        reverse=True,
+    )
+
+
+def trophy_rows(saves: list[GameSave]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for save in saves:
+        payload = save.payload_json if isinstance(save.payload_json, dict) else {}
+        player_name = player_name_for_save(save, payload)
+        entries = payload_fish_entries(payload)
+        trophy_count = sum(1 for entry in entries if is_trophy_entry(entry))
+        trophy_count = max(trophy_count, len(payload.get("trophies") or []))
+        if trophy_count <= 0:
+            continue
+        rows.append(score_record(save, player_name, "trophies", trophy_count))
+    return sorted(rows, key=lambda row: (row["score"], row.get("serverRevision") or 0), reverse=True)
+
+
+def score_rows(saves: list[GameSave], score_type: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for save in saves:
+        payload = save.payload_json if isinstance(save.payload_json, dict) else {}
+        player_name = player_name_for_save(save, payload)
+        score = score_for_payload(payload, score_type)
+        if score <= 0:
+            continue
+        rows.append(score_record(save, player_name, score_type, score))
+    return sorted(rows, key=lambda row: (row["score"], row.get("serverRevision") or 0), reverse=True)
+
+
+def payload_fish_entries(payload: dict[str, Any], *, fish_id: str | None = None) -> list[dict[str, Any]]:
+    entries = payload.get("fishBasket")
+    if not isinstance(entries, list):
+        return []
+    return [
+        entry for entry in entries
+        if isinstance(entry, dict)
+        and entry.get("fishId")
+        and numeric_value(entry.get("weightGrams")) > 0
+        and (fish_id is None or entry.get("fishId") == fish_id)
+    ]
+
+
+def player_name_for_save(save: GameSave, payload: dict[str, Any]) -> str:
+    profile = getattr(save.user, "profile", None)
+    payload_profile = payload.get("playerProfile") if isinstance(payload.get("playerProfile"), dict) else {}
+    return (
+        getattr(profile, "display_name", None)
+        or payload_profile.get("name")
+        or payload_profile.get("playerName")
+        or save.user.email.split("@")[0]
+    )
+
+
+def fish_entry_row(save: GameSave, player_name: str, entry: dict[str, Any]) -> dict[str, Any]:
+    weight_grams = int(numeric_value(entry.get("weightGrams")))
+    return {
+        "playerName": player_name,
+        "fishId": entry.get("fishId"),
+        "fishName": entry.get("fishId"),
+        "weightKg": round(weight_grams / 1000, 3),
+        "weightGrams": weight_grams,
+        "locationId": entry.get("waterId") or entry.get("locationId"),
+        "locationName": entry.get("waterId") or entry.get("locationId") or "unknown",
+        "baitId": entry.get("bait") or entry.get("baitId"),
+        "baitName": entry.get("bait") or entry.get("baitId") or "unknown",
+        "tackleSummary": tackle_summary(entry),
+        "caughtAt": caught_at(entry, save),
+        "verified": False,
+        "serverBacked": True,
+        "source": "server-cloud-save",
+        "serverRevision": save.revision,
+        "totalFishCaught": score_for_payload(save.payload_json, "total-fish"),
+    }
+
+
+def biggest_fish_row(save: GameSave, player_name: str, biggest: dict[str, Any]) -> dict[str, Any]:
+    weight_grams = int(numeric_value(biggest.get("weightGrams")))
+    return {
+        "playerName": player_name,
+        "fishId": biggest.get("fishId"),
+        "fishName": biggest.get("fishId"),
+        "weightKg": round(weight_grams / 1000, 3),
+        "weightGrams": weight_grams,
+        "locationId": biggest.get("waterId") or biggest.get("locationId"),
+        "locationName": biggest.get("waterId") or biggest.get("locationId") or "unknown",
+        "baitId": None,
+        "baitName": "cloud save best",
+        "tackleSummary": "latest cloud save",
+        "caughtAt": day_label(biggest.get("caughtAtDay")) or save_timestamp(save),
+        "verified": False,
+        "serverBacked": True,
+        "source": "server-cloud-save",
+        "serverRevision": save.revision,
+        "totalFishCaught": score_for_payload(save.payload_json, "total-fish"),
+    }
+
+
+def score_record(save: GameSave, player_name: str, score_type: str, score: int) -> dict[str, Any]:
+    return {
+        "playerName": player_name,
+        "fishId": None,
+        "fishName": None,
+        "weightKg": None,
+        "weightGrams": None,
+        "locationId": None,
+        "locationName": "all waters",
+        "baitId": None,
+        "baitName": None,
+        "tackleSummary": f"{score} {score_type}",
+        "caughtAt": save_timestamp(save),
+        "verified": False,
+        "serverBacked": True,
+        "source": "server-cloud-save",
+        "serverRevision": save.revision,
+        "score": score,
+        "coins": score if score_type == "coins" else None,
+        "totalFishCaught": score if score_type == "total-fish" else score_for_payload(save.payload_json, "total-fish"),
+        "trophies": score if score_type == "trophies" else None,
+    }
+
+
+def score_for_payload(payload: dict[str, Any], score_type: str) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    profile = payload.get("playerProfile") if isinstance(payload.get("playerProfile"), dict) else {}
+    stats = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
+    if score_type == "coins":
+        return int(numeric_value(profile.get("totalCoinsEarned") or stats.get("totalCoinsEarned") or payload.get("money")))
+    if score_type == "total-fish":
+        journal_total = 0
+        journal = payload.get("catchJournal")
+        if isinstance(journal, dict):
+            journal_total = sum(int(numeric_value(entry.get("totalCaught"))) for entry in journal.values() if isinstance(entry, dict))
+        return max(
+            int(numeric_value(profile.get("fishCaughtTotal"))),
+            int(numeric_value(stats.get("totalFishCaught") or stats.get("fishCaughtTotal"))),
+            journal_total,
+            len(payload.get("fishBasket") or []),
+        )
+    return 0
+
+
+def is_trophy_entry(entry: dict[str, Any]) -> bool:
+    return bool(entry.get("trophyTier")) or entry.get("catchCategory") in TROPHY_CATEGORIES
+
+
+def tackle_summary(entry: dict[str, Any]) -> str:
+    parts = [
+        entry.get("method"),
+        entry.get("depth"),
+        entry.get("catchSpotId"),
+    ]
+    return " / ".join(str(part) for part in parts if part) or "cloud save catch"
+
+
+def caught_at(entry: dict[str, Any], save: GameSave) -> str:
+    return (
+        entry.get("caughtAt")
+        or entry.get("caughtAtTime")
+        or day_label(entry.get("caughtAtDay"))
+        or save_timestamp(save)
+    )
+
+
+def save_timestamp(save: GameSave) -> str:
+    value = save.client_updated_at or save.server_updated_at or save.created_at
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return "server cloud save"
+
+
+def day_label(value: Any) -> str | None:
+    if value is None:
+        return None
+    return f"day {value}"
+
+
+def numeric_value(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in rows:
+        key = (
+            row.get("playerName"),
+            row.get("fishId"),
+            row.get("weightGrams"),
+            row.get("caughtAt"),
+        )
+        previous = deduped.get(key)
+        if previous is None or (row.get("serverRevision") or 0) > (previous.get("serverRevision") or 0):
+            deduped[key] = row
+    return list(deduped.values())
+
+
+def add_ranks(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{**row, "rank": index + 1} for index, row in enumerate(rows)]
