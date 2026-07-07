@@ -47,7 +47,7 @@ def sync_save(db: Session, user: User, payload: SaveSyncRequest) -> SaveSyncResp
         db.refresh(game_save)
         return SaveSyncResponse(metadata=save_metadata(game_save))
 
-    if payload.revision != game_save.revision:
+    if payload.revision != game_save.revision and not payload.force:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
@@ -67,4 +67,3 @@ def sync_save(db: Session, user: User, payload: SaveSyncRequest) -> SaveSyncResp
     db.commit()
     db.refresh(game_save)
     return SaveSyncResponse(metadata=save_metadata(game_save))
-

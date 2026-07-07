@@ -18,6 +18,7 @@ class SaveMetadata(BaseModel):
 class SaveSyncRequest(BaseModel):
     save_version: int = Field(alias="saveVersion")
     revision: int
+    force: bool = False
     client_updated_at: datetime | None = Field(default=None, alias="clientUpdatedAt")
     checksum: str | None = None
     payload: dict[str, Any]
@@ -32,4 +33,3 @@ class SaveLoadResponse(BaseModel):
 
 class SaveSyncResponse(BaseModel):
     metadata: SaveMetadata
-
