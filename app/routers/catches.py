@@ -7,7 +7,7 @@ from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.user import User
 from app.schemas.catch_record import CatchRecordSyncRequest, CatchRecordSyncResponse
-from app.services.catch_record_service import sync_catch_entries
+from app.services.catch_record_service import sync_catch_entries_with_results
 
 router = APIRouter()
 
@@ -18,7 +18,7 @@ def sync_catches(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> CatchRecordSyncResponse:
-    synced_ids, rejected = sync_catch_entries(
+    synced_ids, rejected, results = sync_catch_entries_with_results(
         db,
         current_user,
         payload.catches,
@@ -30,6 +30,7 @@ def sync_catches(
         syncedCatchIds=synced_ids,
         syncedCount=len(synced_ids),
         rejectedCount=len(rejected),
+        results=results,
         rejected=rejected[:20],
         serverUpdatedAt=datetime.now(timezone.utc),
     )
