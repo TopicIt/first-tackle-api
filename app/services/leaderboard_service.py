@@ -14,6 +14,9 @@ from app.services.catch_record_service import is_trophy_record, sync_catch_recor
 
 LEADERBOARD_LIMIT = 50
 TROPHY_CATEGORIES = {"trophy", "very_rare", "legendary"}
+FISH_ID_ALIASES = {
+    "perch": "okun",
+}
 
 
 def get_leaderboard(db: Session, board_type: str, *, fish_id: str | None = None) -> dict[str, Any]:
@@ -108,7 +111,7 @@ def fish_rows(records: list[CatchRecord], *, fish_id: str | None = None) -> list
     rows = [
         catch_record_row(record)
         for record in records
-        if fish_id is None or record.fish_id == fish_id
+        if fish_id is None or normalize_fish_id(record.fish_id) == normalize_fish_id(fish_id)
     ]
     return sorted(
         dedupe_rows(rows),
@@ -125,7 +128,7 @@ def legacy_fish_rows(saves: list[GameSave], *, fish_id: str | None = None) -> li
         rows.extend(fish_entry_row(save, player_name, entry) for entry in payload_fish_entries(payload, fish_id=fish_id))
 
         biggest = payload.get("stats", {}).get("biggestFish")
-        if isinstance(biggest, dict) and (fish_id is None or biggest.get("fishId") == fish_id):
+        if isinstance(biggest, dict) and (fish_id is None or normalize_fish_id(biggest.get("fishId")) == normalize_fish_id(fish_id)):
             rows.append(biggest_fish_row(save, player_name, biggest))
 
     return sorted(
@@ -174,8 +177,8 @@ def catch_record_row(record: CatchRecord) -> dict[str, Any]:
     return {
         **player_identity_fields_for_user(record.user, payload),
         "playerName": player_name,
-        "fishId": record.fish_id,
-        "fishName": record.fish_id,
+        "fishId": normalize_fish_id(record.fish_id),
+        "fishName": normalize_fish_id(record.fish_id),
         "weightKg": round(weight_grams / 1000, 3),
         "weightGrams": weight_grams,
         "locationId": record.water_id,
@@ -225,7 +228,7 @@ def payload_fish_entries(payload: dict[str, Any], *, fish_id: str | None = None)
         if isinstance(entry, dict)
         and entry.get("fishId")
         and numeric_value(entry.get("weightGrams")) > 0
-        and (fish_id is None or entry.get("fishId") == fish_id)
+        and (fish_id is None or normalize_fish_id(entry.get("fishId")) == normalize_fish_id(fish_id))
     ]
 
 
@@ -245,8 +248,8 @@ def fish_entry_row(save: GameSave, player_name: str, entry: dict[str, Any]) -> d
     row = {
         **player_identity_fields(save, save.payload_json if isinstance(save.payload_json, dict) else {}),
         "playerName": player_name,
-        "fishId": entry.get("fishId"),
-        "fishName": entry.get("fishId"),
+        "fishId": normalize_fish_id(entry.get("fishId")),
+        "fishName": normalize_fish_id(entry.get("fishId")),
         "weightKg": round(weight_grams / 1000, 3),
         "weightGrams": weight_grams,
         "locationId": entry.get("waterId") or entry.get("locationId"),
@@ -275,8 +278,8 @@ def biggest_fish_row(save: GameSave, player_name: str, biggest: dict[str, Any]) 
     return {
         **player_identity_fields(save, save.payload_json if isinstance(save.payload_json, dict) else {}),
         "playerName": player_name,
-        "fishId": biggest.get("fishId"),
-        "fishName": biggest.get("fishId"),
+        "fishId": normalize_fish_id(biggest.get("fishId")),
+        "fishName": normalize_fish_id(biggest.get("fishId")),
         "weightKg": round(weight_grams / 1000, 3),
         "weightGrams": weight_grams,
         "locationId": biggest.get("waterId") or biggest.get("locationId") or biggest.get("biggestFishWaterId"),
@@ -378,8 +381,8 @@ def trophy_group_rows(records: list[CatchRecord]) -> list[dict[str, Any]]:
         rows.append({
             **player_identity_fields_for_user(first.user, payload),
             "playerName": player_name,
-            "fishId": fish_id,
-            "fishName": fish_id,
+            "fishId": normalize_fish_id(fish_id),
+            "fishName": normalize_fish_id(fish_id),
             "weightKg": round(best_weight / 1000, 3) if best_weight else None,
             "weightGrams": best_weight or None,
             "bestTrophyWeightKg": round(best_weight / 1000, 3) if best_weight else None,
@@ -414,7 +417,7 @@ def trophy_group_rows(records: list[CatchRecord]) -> list[dict[str, Any]]:
 
 def normalize_trophy_record_entry(record: CatchRecord) -> dict[str, Any]:
     return {
-        "fishId": record.fish_id,
+        "fishId": normalize_fish_id(record.fish_id),
         "weightGrams": int(record.weight_grams or 0),
         "caughtAtDay": record.caught_at_day,
         "caughtAtTime": record.caught_at_time,
@@ -438,7 +441,7 @@ def payload_trophy_entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 def normalize_trophy_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return {
-        "fishId": entry.get("fishId"),
+        "fishId": normalize_fish_id(entry.get("fishId")),
         "weightGrams": int(numeric_value(entry.get("weightGrams"))),
         "caughtAtDay": numeric_int_or_none(entry.get("caughtAtDay")),
         "caughtAtTime": entry.get("caughtAtTime"),
@@ -556,6 +559,11 @@ def is_corrupted_placeholder_name(value: str) -> bool:
     if not stripped or "?" not in stripped:
         return False
     return not any(char.isalnum() for char in stripped)
+
+
+def normalize_fish_id(value: Any) -> str:
+    fish_id = str(value or "").strip()
+    return FISH_ID_ALIASES.get(fish_id, fish_id)
 
 
 def numeric_value(value: Any) -> float:

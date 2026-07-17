@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
-from app.routers import auth, health, leaderboard, profile, save
+from app.routers import auth, catches, health, leaderboard, profile, save
 
 
 def create_app() -> FastAPI:
@@ -24,6 +24,7 @@ def create_app() -> FastAPI:
     app.include_router(auth.router, prefix="/auth", tags=["auth"])
     app.include_router(profile.router, prefix="/profile", tags=["profile"])
     app.include_router(save.router, prefix="/save", tags=["save"])
+    app.include_router(catches.router, prefix="/api/catches", tags=["catches"])
     app.include_router(leaderboard.router, prefix="/api/leaderboard", tags=["leaderboard"])
     return app
 

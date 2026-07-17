@@ -13,6 +13,9 @@ from app.models.user import User
 
 
 TROPHY_CATEGORIES = {"trophy", "very_rare", "legendary"}
+FISH_ID_ALIASES = {
+    "perch": "okun",
+}
 
 
 def sync_catch_records_from_save(db: Session, user: User, game_save: GameSave) -> int:
@@ -21,14 +24,44 @@ def sync_catch_records_from_save(db: Session, user: User, game_save: GameSave) -
         deactivate_user_catch_records(db, user.id)
         return 0
 
+    synced_ids, _rejected = sync_catch_entries(
+        db,
+        user,
+        extract_catch_entries(payload),
+        source_revision=game_save.revision,
+        source_updated_at=game_save.client_updated_at or game_save.server_updated_at,
+    )
+    return len(synced_ids)
+
+
+def sync_catch_entries(
+    db: Session,
+    user: User,
+    entries: list[dict[str, Any]],
+    *,
+    source_revision: int | None = None,
+    source_updated_at: datetime | None = None,
+) -> tuple[list[str], list[dict[str, Any]]]:
     upserted = 0
-    for entry in extract_catch_entries(payload):
-        normalized = normalize_catch_entry(user, game_save, entry)
+    synced_ids: list[str] = []
+    rejected: list[dict[str, Any]] = []
+    for entry in dedupe_extracted_entries([entry for entry in entries if isinstance(entry, dict)]):
+        normalized = normalize_catch_entry(
+            user,
+            entry,
+            source_revision=source_revision,
+            source_updated_at=source_updated_at,
+        )
         if not normalized:
+            rejected.append({
+                "catchId": normalized_string(entry.get("catchId") or entry.get("id")),
+                "reason": "invalid-catch",
+            })
             continue
         upsert_catch_record(db, normalized)
         upserted += 1
-    return upserted
+        synced_ids.append(normalized["catch_id"] or normalized["catch_key"])
+    return synced_ids, rejected
 
 
 def deactivate_user_catch_records(db: Session, user_id: str) -> int:
@@ -52,7 +85,7 @@ def extract_catch_entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
         for raw_entry in raw_entries:
             if not isinstance(raw_entry, dict):
                 continue
-            if not raw_entry.get("fishId") or numeric_value(raw_entry.get("weightGrams")) <= 0:
+            if not raw_entry.get("fishId") or normalized_weight_grams(raw_entry) <= 0:
                 continue
             entries.append({**raw_entry, "_source": source})
     return dedupe_extracted_entries(entries)
@@ -67,9 +100,9 @@ def dedupe_extracted_entries(entries: list[dict[str, Any]]) -> list[dict[str, An
     deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
     for entry in entries:
         key = (
-            entry.get("id"),
-            entry.get("fishId"),
-            int(numeric_value(entry.get("weightGrams"))),
+            entry.get("catchId") or entry.get("id"),
+            normalize_fish_id(entry.get("fishId")),
+            normalized_weight_grams(entry),
             entry.get("caughtAtDay"),
             entry.get("caughtAtTime"),
             entry.get("trophyTier") or entry.get("tier"),
@@ -80,9 +113,15 @@ def dedupe_extracted_entries(entries: list[dict[str, Any]]) -> list[dict[str, An
     return list(deduped.values())
 
 
-def normalize_catch_entry(user: User, game_save: GameSave, entry: dict[str, Any]) -> dict[str, Any] | None:
-    fish_id = str(entry.get("fishId") or "").strip()
-    weight_grams = int(numeric_value(entry.get("weightGrams")))
+def normalize_catch_entry(
+    user: User,
+    entry: dict[str, Any],
+    *,
+    source_revision: int | None = None,
+    source_updated_at: datetime | None = None,
+) -> dict[str, Any] | None:
+    fish_id = normalize_fish_id(entry.get("fishId"))
+    weight_grams = normalized_weight_grams(entry)
     if not fish_id or weight_grams <= 0:
         return None
 
@@ -113,8 +152,8 @@ def normalize_catch_entry(user: User, game_save: GameSave, entry: dict[str, Any]
         "caught_at_day": numeric_int_or_none(entry.get("caughtAtDay")),
         "caught_at_time": normalized_string(entry.get("caughtAtTime")),
         "caught_at": normalized_string(entry.get("caughtAt")),
-        "source_revision": game_save.revision,
-        "source_updated_at": game_save.client_updated_at or game_save.server_updated_at,
+        "source_revision": source_revision,
+        "source_updated_at": source_updated_at,
         "raw_json": {
             key: value
             for key, value in entry.items()
@@ -162,7 +201,7 @@ def catch_key_for_entry(user_id: str, catch_id: str | None, entry: dict[str, Any
         return f"id:{catch_id}"[:96]
     basis = "|".join([
         user_id,
-        str(entry.get("fishId") or ""),
+        normalize_fish_id(entry.get("fishId")),
         str(int(numeric_value(entry.get("weightGrams")))),
         str(entry.get("caughtAtDay") or ""),
         str(entry.get("caughtAtTime") or entry.get("caughtAt") or ""),
@@ -170,6 +209,11 @@ def catch_key_for_entry(user_id: str, catch_id: str | None, entry: dict[str, Any
         str(entry.get("bait") or entry.get("baitId") or ""),
     ])
     return f"hash:{hashlib.sha256(basis.encode('utf-8')).hexdigest()[:48]}"
+
+
+def normalize_fish_id(value: Any) -> str:
+    fish_id = str(value or "").strip()
+    return FISH_ID_ALIASES.get(fish_id, fish_id)
 
 
 def tackle_summary(entry: dict[str, Any]) -> str | None:
@@ -199,3 +243,16 @@ def numeric_value(value: Any) -> float:
 def numeric_int_or_none(value: Any) -> int | None:
     number = numeric_value(value)
     return int(number) if number else None
+
+
+def normalized_weight_grams(entry: dict[str, Any]) -> int:
+    weight_grams = numeric_value(entry.get("weightGrams"))
+    if weight_grams > 0:
+        return int(weight_grams)
+    weight_kg = numeric_value(entry.get("weightKg"))
+    if weight_kg > 0:
+        return int(round(weight_kg * 1000))
+    weight = numeric_value(entry.get("weight"))
+    if weight <= 0:
+        return 0
+    return int(round(weight * 1000)) if weight <= 20 else int(round(weight))
