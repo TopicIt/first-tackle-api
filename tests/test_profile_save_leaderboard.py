@@ -108,6 +108,56 @@ class ProfileSaveLeaderboardTests(unittest.TestCase):
             sync_save(db, user, self.save_request(2, force=True, reset=True))
             self.assertEqual(db.query(CatchRecord).filter(CatchRecord.active.is_(True)).count(), 0)
 
+    def test_leaderboard_keeps_utf8_names_and_readable_labels(self):
+        engine = self.make_engine()
+        Base.metadata.create_all(engine)
+        with Session(engine, expire_on_commit=False) as db:
+            user = self.create_user(db, name="\u0406\u0432\u0430\u0441\u0438\u043a \u0422\u0435\u043b\u0435\u0441\u0438\u043a")
+            payload = SaveSyncRequest(
+                saveVersion=1,
+                revision=0,
+                payload={
+                    "playerProfile": {"name": "\u0406\u0432\u0430\u0441\u0438\u043a \u0422\u0435\u043b\u0435\u0441\u0438\u043a", "level": 2, "xp": 45},
+                    "catchHistory": [{
+                        "catchId": "utf8-catch-1",
+                        "fishId": "carp",
+                        "weightGrams": 1330,
+                        "caughtAtDay": 1,
+                    }],
+                    "fishBasket": [],
+                },
+            )
+            sync_save(db, user, payload)
+
+            board = get_leaderboard(db, "biggest-fish")
+            self.assertEqual(board["records"][0]["playerName"], "\u0406\u0432\u0430\u0441\u0438\u043a \u0422\u0435\u043b\u0435\u0441\u0438\u043a")
+            self.assertEqual(board["records"][0]["caughtAt"], "\u0414\u0435\u043d\u044c 1")
+            self.assertIsNone(board["records"][0]["tackleSummary"])
+
+    def test_corrupted_placeholder_name_falls_back_to_valid_payload_name(self):
+        engine = self.make_engine()
+        Base.metadata.create_all(engine)
+        with Session(engine, expire_on_commit=False) as db:
+            user = self.create_user(db, name="????? ??????????? ???????")
+            payload = SaveSyncRequest(
+                saveVersion=1,
+                revision=0,
+                payload={
+                    "playerProfile": {"name": "\u041c\u0430\u0440\u0456\u0447\u043a\u0430", "level": 2, "xp": 45},
+                    "catchHistory": [{
+                        "catchId": "utf8-catch-2",
+                        "fishId": "rotan",
+                        "weightGrams": 140,
+                        "caughtAt": "2026-07-17T10:00:00Z",
+                    }],
+                    "fishBasket": [],
+                },
+            )
+            sync_save(db, user, payload)
+
+            board = get_leaderboard(db, "biggest-fish")
+            self.assertEqual(board["records"][0]["playerName"], "\u041c\u0430\u0440\u0456\u0447\u043a\u0430")
+
 
 class CatchHistorySyncTests(unittest.TestCase):
     def make_engine(self):

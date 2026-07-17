@@ -172,13 +172,14 @@ def catch_key_for_entry(user_id: str, catch_id: str | None, entry: dict[str, Any
     return f"hash:{hashlib.sha256(basis.encode('utf-8')).hexdigest()[:48]}"
 
 
-def tackle_summary(entry: dict[str, Any]) -> str:
+def tackle_summary(entry: dict[str, Any]) -> str | None:
     parts = [
         entry.get("method"),
         entry.get("depth"),
         entry.get("catchSpotId") or entry.get("spotId"),
     ]
-    return " / ".join(str(part) for part in parts if part) or "cloud save catch"
+    summary = " / ".join(str(part) for part in parts if part)
+    return summary or None
 
 
 def normalized_string(value: Any) -> str | None:

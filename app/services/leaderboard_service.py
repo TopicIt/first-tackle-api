@@ -179,13 +179,13 @@ def catch_record_row(record: CatchRecord) -> dict[str, Any]:
         "weightKg": round(weight_grams / 1000, 3),
         "weightGrams": weight_grams,
         "locationId": record.water_id,
-        "locationName": record.water_id or "unknown",
+        "locationName": record.water_id,
         "baitId": record.bait_id,
-        "baitName": record.bait_id or "unknown",
+        "baitName": record.bait_id,
         "depth": record.depth,
         "catchSpotId": record.cast_spot_id,
         "method": record.method,
-        "tackleSummary": record.tackle_summary or "cloud save catch",
+        "tackleSummary": record.tackle_summary,
         "caughtAt": record.caught_at or record.caught_at_time or day_label(record.caught_at_day) or save_timestamp(save),
         "caughtAtDay": record.caught_at_day,
         "caughtAtTime": record.caught_at_time,
@@ -233,9 +233,9 @@ def player_name_for_save(save: GameSave, payload: dict[str, Any]) -> str:
     profile = getattr(save.user, "profile", None)
     payload_profile = payload.get("playerProfile") if isinstance(payload.get("playerProfile"), dict) else {}
     return (
-        getattr(profile, "display_name", None)
-        or payload_profile.get("name")
-        or payload_profile.get("playerName")
+        normalized_player_name(getattr(profile, "display_name", None))
+        or normalized_player_name(payload_profile.get("name"))
+        or normalized_player_name(payload_profile.get("playerName"))
         or save.user.email.split("@")[0]
     )
 
@@ -385,13 +385,13 @@ def trophy_group_rows(records: list[CatchRecord]) -> list[dict[str, Any]]:
             "bestTrophyWeightKg": round(best_weight / 1000, 3) if best_weight else None,
             "bestTrophyWeightGrams": best_weight,
             "locationId": best.water_id,
-            "locationName": best.water_id or "unknown",
+            "locationName": best.water_id,
             "baitId": best.bait_id,
             "baitName": best.bait_id,
             "depth": best.depth,
             "catchSpotId": best.cast_spot_id,
             "method": best.method,
-            "tackleSummary": f"{len(trophies)} trophies",
+            "tackleSummary": None,
             "caughtAt": recent.caught_at or recent.caught_at_time or day_label(recent.caught_at_day) or save_timestamp(save),
             "caughtAtDay": recent.caught_at_day,
             "caughtAtTime": recent.caught_at_time,
@@ -482,9 +482,9 @@ def player_name_for_user(user: User, payload: dict[str, Any]) -> str:
     profile = getattr(user, "profile", None)
     payload_profile = payload.get("playerProfile") if isinstance(payload.get("playerProfile"), dict) else {}
     return (
-        getattr(profile, "display_name", None)
-        or payload_profile.get("name")
-        or payload_profile.get("playerName")
+        normalized_player_name(getattr(profile, "display_name", None))
+        or normalized_player_name(payload_profile.get("name"))
+        or normalized_player_name(payload_profile.get("playerName"))
         or user.email.split("@")[0]
     )
 
@@ -502,13 +502,14 @@ def player_identity_fields_for_user(user: User, payload: dict[str, Any]) -> dict
     }
 
 
-def tackle_summary(entry: dict[str, Any]) -> str:
+def tackle_summary(entry: dict[str, Any]) -> str | None:
     parts = [
         entry.get("method"),
         entry.get("depth"),
         entry.get("catchSpotId"),
     ]
-    return " / ".join(str(part) for part in parts if part) or "cloud save catch"
+    summary = " / ".join(str(part) for part in parts if part)
+    return summary or None
 
 
 def caught_at(entry: dict[str, Any], save: GameSave) -> str:
@@ -522,21 +523,39 @@ def caught_at(entry: dict[str, Any], save: GameSave) -> str:
 
 def save_timestamp(save: GameSave) -> str:
     if save is None:
-        return "server catch record"
+        return "сервер"
     value = save.client_updated_at or save.server_updated_at or save.created_at
     if isinstance(value, datetime):
         return value.isoformat()
-    return "server cloud save"
+    return "сервер"
 
 
 def timestamp_value(value: datetime | None) -> str:
-    return value.isoformat() if isinstance(value, datetime) else "server catch record"
+    return value.isoformat() if isinstance(value, datetime) else "сервер"
 
 
 def day_label(value: Any) -> str | None:
     if value is None:
         return None
-    return f"day {value}"
+    return f"День {value}"
+
+
+def normalized_player_name(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if is_corrupted_placeholder_name(text):
+        return None
+    return text
+
+
+def is_corrupted_placeholder_name(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped or "?" not in stripped:
+        return False
+    return not any(char.isalnum() for char in stripped)
 
 
 def numeric_value(value: Any) -> float:
