@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from app.models.game_save import GameSave
 from app.models.user import User
 from app.schemas.save import SaveLoadResponse, SaveMetadata, SaveSyncRequest, SaveSyncResponse
+from app.services.catch_record_service import sync_catch_records_from_save
 
 
 def save_metadata(game_save: GameSave | None) -> SaveMetadata:
@@ -43,6 +44,7 @@ def sync_save(db: Session, user: User, payload: SaveSyncRequest) -> SaveSyncResp
             client_updated_at=payload.client_updated_at,
         )
         db.add(game_save)
+        sync_catch_records_from_save(db, user, game_save)
         db.commit()
         db.refresh(game_save)
         return SaveSyncResponse(metadata=save_metadata(game_save))
@@ -64,6 +66,7 @@ def sync_save(db: Session, user: User, payload: SaveSyncRequest) -> SaveSyncResp
     game_save.checksum = payload.checksum
     game_save.client_updated_at = payload.client_updated_at
     db.add(game_save)
+    sync_catch_records_from_save(db, user, game_save)
     db.commit()
     db.refresh(game_save)
     return SaveSyncResponse(metadata=save_metadata(game_save))

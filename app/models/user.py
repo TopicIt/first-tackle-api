@@ -26,7 +26,7 @@ class User(Base):
 
     profile = relationship("PlayerProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
     game_save = relationship("GameSave", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    catch_records = relationship("CatchRecord", back_populates="user", cascade="all, delete-orphan")
 
     def mark_login(self) -> None:
         self.last_login_at = datetime.now(UTC)
-
