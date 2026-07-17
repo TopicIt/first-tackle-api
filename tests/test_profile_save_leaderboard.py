@@ -17,6 +17,7 @@ from app.models.profile import PlayerProfile
 from app.models.user import User
 from app.schemas.profile import ProfileUpdateRequest
 from app.schemas.save import SaveSyncRequest
+from app.services.catch_record_service import sync_catch_entries
 from app.services.leaderboard_service import get_leaderboard
 from app.services.save_service import sync_save
 
@@ -228,6 +229,54 @@ class CatchHistorySyncTests(unittest.TestCase):
             self.assertEqual(len(records), 1)
             self.assertTrue(records[0].active)
             self.assertEqual(records[0].catch_id, "catch-stable-1")
+
+    def test_explicit_catch_sync_acknowledges_real_gameplay_payload_and_dedupes(self):
+        engine = self.make_engine()
+        Base.metadata.create_all(engine)
+        with Session(engine, expire_on_commit=False) as db:
+            user = self.create_user(db)
+            catch = {
+                "catchId": "gameplay-okun-190g",
+                "fishId": "perch",
+                "weightGrams": 190,
+                "waterId": "sluice",
+                "bait": "worms",
+                "method": "stickRod",
+                "depth": "middle",
+                "catchSpotId": "sluice_middle",
+                "caughtAtDay": 1,
+                "caughtAtTime": "10:15",
+                "caughtAt": "2026-07-17T10:15:00Z",
+            }
+
+            synced_ids, rejected = sync_catch_entries(
+                db,
+                user,
+                [catch],
+                source_revision=7,
+            )
+            db.commit()
+            self.assertEqual(synced_ids, ["gameplay-okun-190g"])
+            self.assertEqual(rejected, [])
+            self.assertEqual(db.query(CatchRecord).count(), 1)
+
+            synced_ids, rejected = sync_catch_entries(
+                db,
+                user,
+                [catch],
+                source_revision=8,
+            )
+            db.commit()
+            self.assertEqual(synced_ids, ["gameplay-okun-190g"])
+            self.assertEqual(rejected, [])
+            self.assertEqual(db.query(CatchRecord).count(), 1)
+
+            board = get_leaderboard(db, "biggest-fish")
+            row = board["records"][0]
+            self.assertEqual(board["source"], "server-catch-records")
+            self.assertEqual(row["catchId"], "gameplay-okun-190g")
+            self.assertEqual(row["fishId"], "okun")
+            self.assertEqual(row["weightGrams"], 190)
 
 
 if __name__ == "__main__":
