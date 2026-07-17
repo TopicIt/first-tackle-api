@@ -109,5 +109,76 @@ class ProfileSaveLeaderboardTests(unittest.TestCase):
             self.assertEqual(db.query(CatchRecord).filter(CatchRecord.active.is_(True)).count(), 0)
 
 
+class CatchHistorySyncTests(unittest.TestCase):
+    def make_engine(self):
+        return create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+
+    def create_user(self, db: Session) -> User:
+        user = User(email="catch-history@example.invalid", password_hash="test")
+        user.profile = PlayerProfile(display_name="Тестовий рибалка", language="uk")
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        return user
+
+    def test_catch_history_survives_keepnet_sale_and_dedupes_repeated_sync(self):
+        engine = self.make_engine()
+        Base.metadata.create_all(engine)
+        with Session(engine, expire_on_commit=False) as db:
+            user = self.create_user(db)
+            first_payload = SaveSyncRequest(
+                saveVersion=1,
+                revision=0,
+                payload={
+                    "playerProfile": {"name": "Тестовий рибалка", "level": 4, "xp": 120},
+                    "catchHistory": [{
+                        "catchId": "catch-stable-1",
+                        "fishId": "carp",
+                        "weightGrams": 1450,
+                        "waterId": "greada",
+                        "caughtAt": "2026-07-17T10:00:00Z",
+                    }],
+                    "fishBasket": [{
+                        "id": "catch-stable-1",
+                        "fishId": "carp",
+                        "weightGrams": 1450,
+                        "waterId": "greada",
+                        "caughtAt": "2026-07-17T10:00:00Z",
+                    }],
+                },
+            )
+            sync_save(db, user, first_payload)
+            self.assertEqual(db.query(CatchRecord).count(), 1)
+            db.expire_all()
+            user = db.scalar(select(User).where(User.email == "catch-history@example.invalid"))
+
+            second_payload = SaveSyncRequest(
+                saveVersion=1,
+                revision=1,
+                force=True,
+                payload={
+                    "playerProfile": {"name": "Тестовий рибалка", "level": 4, "xp": 120},
+                    "catchHistory": [{
+                        "catchId": "catch-stable-1",
+                        "fishId": "carp",
+                        "weightGrams": 1450,
+                        "waterId": "greada",
+                        "caughtAt": "2026-07-17T10:00:00Z",
+                    }],
+                    "fishBasket": [],
+                },
+            )
+            sync_save(db, user, second_payload)
+
+            records = db.query(CatchRecord).all()
+            self.assertEqual(len(records), 1)
+            self.assertTrue(records[0].active)
+            self.assertEqual(records[0].catch_id, "catch-stable-1")
+
+
 if __name__ == "__main__":
     unittest.main()

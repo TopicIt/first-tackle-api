@@ -45,7 +45,7 @@ def deactivate_user_catch_records(db: Session, user_id: str) -> int:
 
 def extract_catch_entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
-    for source in ("fishBasket", "trophies"):
+    for source in ("catchHistory", "fishBasket", "trophies"):
         raw_entries = payload.get(source)
         if not isinstance(raw_entries, list):
             continue
@@ -59,6 +59,11 @@ def extract_catch_entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def dedupe_extracted_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    source_priority = {
+        "catchHistory": 3,
+        "fishBasket": 2,
+        "trophies": 1,
+    }
     deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
     for entry in entries:
         key = (
@@ -70,7 +75,7 @@ def dedupe_extracted_entries(entries: list[dict[str, Any]]) -> list[dict[str, An
             entry.get("trophyTier") or entry.get("tier"),
         )
         previous = deduped.get(key)
-        if previous is None or previous.get("_source") != "fishBasket":
+        if previous is None or source_priority.get(entry.get("_source"), 0) >= source_priority.get(previous.get("_source"), 0):
             deduped[key] = entry
     return list(deduped.values())
 
