@@ -41,7 +41,7 @@ def sync_save(db: Session, user: User, payload: SaveSyncRequest) -> SaveSyncResp
     game_save = user.game_save
     if game_save is None:
         game_save = GameSave(
-            user_id=user.id,
+            user=user,
             save_version=payload.save_version,
             revision=1,
             payload_json=payload.payload,
@@ -49,6 +49,7 @@ def sync_save(db: Session, user: User, payload: SaveSyncRequest) -> SaveSyncResp
             client_updated_at=payload.client_updated_at,
         )
         db.add(game_save)
+        user.game_save = game_save
         db.commit()
         db.refresh(game_save)
         sync_catch_records_best_effort(db, user, game_save)

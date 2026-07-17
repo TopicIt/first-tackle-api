@@ -45,7 +45,7 @@ def deactivate_user_catch_records(db: Session, user_id: str) -> int:
 
 def extract_catch_entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
-    for source in ("fishBasket", "trophies"):
+    for source in ("catchHistory", "fishBasket", "trophies"):
         raw_entries = payload.get(source)
         if not isinstance(raw_entries, list):
             continue
@@ -59,6 +59,11 @@ def extract_catch_entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def dedupe_extracted_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    source_priority = {
+        "catchHistory": 3,
+        "fishBasket": 2,
+        "trophies": 1,
+    }
     deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
     for entry in entries:
         key = (
@@ -70,7 +75,7 @@ def dedupe_extracted_entries(entries: list[dict[str, Any]]) -> list[dict[str, An
             entry.get("trophyTier") or entry.get("tier"),
         )
         previous = deduped.get(key)
-        if previous is None or previous.get("_source") != "fishBasket":
+        if previous is None or source_priority.get(entry.get("_source"), 0) >= source_priority.get(previous.get("_source"), 0):
             deduped[key] = entry
     return list(deduped.values())
 
@@ -167,13 +172,14 @@ def catch_key_for_entry(user_id: str, catch_id: str | None, entry: dict[str, Any
     return f"hash:{hashlib.sha256(basis.encode('utf-8')).hexdigest()[:48]}"
 
 
-def tackle_summary(entry: dict[str, Any]) -> str:
+def tackle_summary(entry: dict[str, Any]) -> str | None:
     parts = [
         entry.get("method"),
         entry.get("depth"),
         entry.get("catchSpotId") or entry.get("spotId"),
     ]
-    return " / ".join(str(part) for part in parts if part) or "cloud save catch"
+    summary = " / ".join(str(part) for part in parts if part)
+    return summary or None
 
 
 def normalized_string(value: Any) -> str | None:
