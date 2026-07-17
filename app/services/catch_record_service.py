@@ -1,0 +1,195 @@
+from __future__ import annotations
+
+import hashlib
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.models.catch_record import CatchRecord
+from app.models.game_save import GameSave
+from app.models.user import User
+
+
+TROPHY_CATEGORIES = {"trophy", "very_rare", "legendary"}
+
+
+def sync_catch_records_from_save(db: Session, user: User, game_save: GameSave) -> int:
+    payload = game_save.payload_json if isinstance(game_save.payload_json, dict) else {}
+    if is_explicit_reset_payload(payload):
+        deactivate_user_catch_records(db, user.id)
+        return 0
+
+    upserted = 0
+    for entry in extract_catch_entries(payload):
+        normalized = normalize_catch_entry(user, game_save, entry)
+        if not normalized:
+            continue
+        upsert_catch_record(db, normalized)
+        upserted += 1
+    return upserted
+
+
+def deactivate_user_catch_records(db: Session, user_id: str) -> int:
+    records = db.scalars(
+        select(CatchRecord)
+        .where(CatchRecord.user_id == user_id)
+        .where(CatchRecord.active.is_(True))
+    ).all()
+    for record in records:
+        record.active = False
+        db.add(record)
+    return len(records)
+
+
+def extract_catch_entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for source in ("fishBasket", "trophies"):
+        raw_entries = payload.get(source)
+        if not isinstance(raw_entries, list):
+            continue
+        for raw_entry in raw_entries:
+            if not isinstance(raw_entry, dict):
+                continue
+            if not raw_entry.get("fishId") or numeric_value(raw_entry.get("weightGrams")) <= 0:
+                continue
+            entries.append({**raw_entry, "_source": source})
+    return dedupe_extracted_entries(entries)
+
+
+def dedupe_extracted_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for entry in entries:
+        key = (
+            entry.get("id"),
+            entry.get("fishId"),
+            int(numeric_value(entry.get("weightGrams"))),
+            entry.get("caughtAtDay"),
+            entry.get("caughtAtTime"),
+            entry.get("trophyTier") or entry.get("tier"),
+        )
+        previous = deduped.get(key)
+        if previous is None or previous.get("_source") != "fishBasket":
+            deduped[key] = entry
+    return list(deduped.values())
+
+
+def normalize_catch_entry(user: User, game_save: GameSave, entry: dict[str, Any]) -> dict[str, Any] | None:
+    fish_id = str(entry.get("fishId") or "").strip()
+    weight_grams = int(numeric_value(entry.get("weightGrams")))
+    if not fish_id or weight_grams <= 0:
+        return None
+
+    catch_id = normalized_string(entry.get("catchId") or entry.get("id"))
+    catch_key = catch_key_for_entry(user.id, catch_id, entry)
+    trophy_tier = normalized_string(entry.get("trophyTier") or entry.get("tier"))
+    catch_category = normalized_string(entry.get("catchCategory"))
+    water_id = normalized_string(entry.get("waterId") or entry.get("locationId"))
+    bait_id = normalized_string(entry.get("bait") or entry.get("baitId"))
+    method = normalized_string(entry.get("method"))
+    depth = normalized_string(entry.get("depth"))
+    cast_spot_id = normalized_string(entry.get("catchSpotId") or entry.get("spotId"))
+
+    return {
+        "user_id": user.id,
+        "catch_key": catch_key,
+        "catch_id": catch_id,
+        "fish_id": fish_id,
+        "weight_grams": weight_grams,
+        "catch_category": catch_category,
+        "trophy_tier": trophy_tier,
+        "water_id": water_id,
+        "bait_id": bait_id,
+        "method": method,
+        "tackle_summary": tackle_summary(entry),
+        "depth": depth,
+        "cast_spot_id": cast_spot_id,
+        "caught_at_day": numeric_int_or_none(entry.get("caughtAtDay")),
+        "caught_at_time": normalized_string(entry.get("caughtAtTime")),
+        "caught_at": normalized_string(entry.get("caughtAt")),
+        "source_revision": game_save.revision,
+        "source_updated_at": game_save.client_updated_at or game_save.server_updated_at,
+        "raw_json": {
+            key: value
+            for key, value in entry.items()
+            if not key.startswith("_")
+        },
+    }
+
+
+def upsert_catch_record(db: Session, values: dict[str, Any]) -> CatchRecord:
+    existing = db.scalar(
+        select(CatchRecord)
+        .where(CatchRecord.user_id == values["user_id"])
+        .where(CatchRecord.catch_key == values["catch_key"])
+    )
+    if existing is None:
+        record = CatchRecord(**values, active=True)
+    else:
+        record = existing
+        for key, value in values.items():
+            setattr(record, key, value)
+        record.active = True
+    db.add(record)
+    return record
+
+
+def is_explicit_reset_payload(payload: dict[str, Any]) -> bool:
+    tombstone = payload.get("resetTombstone")
+    if isinstance(tombstone, dict) and tombstone.get("resetAt"):
+        return True
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    return bool(metadata.get("resetTombstone") or metadata.get("resetAt"))
+
+
+def is_trophy_record(record: CatchRecord) -> bool:
+    return bool(
+        record.trophy_tier
+        or record.catch_category in TROPHY_CATEGORIES
+        or (record.raw_json or {}).get("isTrophy") is True
+        or (record.raw_json or {}).get("trophy") is True
+    )
+
+
+def catch_key_for_entry(user_id: str, catch_id: str | None, entry: dict[str, Any]) -> str:
+    if catch_id:
+        return f"id:{catch_id}"[:96]
+    basis = "|".join([
+        user_id,
+        str(entry.get("fishId") or ""),
+        str(int(numeric_value(entry.get("weightGrams")))),
+        str(entry.get("caughtAtDay") or ""),
+        str(entry.get("caughtAtTime") or entry.get("caughtAt") or ""),
+        str(entry.get("waterId") or entry.get("locationId") or ""),
+        str(entry.get("bait") or entry.get("baitId") or ""),
+    ])
+    return f"hash:{hashlib.sha256(basis.encode('utf-8')).hexdigest()[:48]}"
+
+
+def tackle_summary(entry: dict[str, Any]) -> str:
+    parts = [
+        entry.get("method"),
+        entry.get("depth"),
+        entry.get("catchSpotId") or entry.get("spotId"),
+    ]
+    return " / ".join(str(part) for part in parts if part) or "cloud save catch"
+
+
+def normalized_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def numeric_value(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def numeric_int_or_none(value: Any) -> int | None:
+    number = numeric_value(value)
+    return int(number) if number else None
