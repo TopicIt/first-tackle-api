@@ -17,7 +17,7 @@ from app.models.profile import PlayerProfile
 from app.models.user import User
 from app.schemas.profile import ProfileUpdateRequest
 from app.schemas.save import SaveSyncRequest
-from app.services.catch_record_service import sync_catch_entries
+from app.services.catch_record_service import sync_catch_entries, sync_catch_entries_with_results
 from app.services.leaderboard_service import get_leaderboard
 from app.services.save_service import sync_save
 
@@ -277,6 +277,37 @@ class CatchHistorySyncTests(unittest.TestCase):
             self.assertEqual(row["catchId"], "gameplay-okun-190g")
             self.assertEqual(row["fishId"], "okun")
             self.assertEqual(row["weightGrams"], 190)
+
+    def test_explicit_catch_sync_reports_per_record_statuses(self):
+        engine = self.make_engine()
+        Base.metadata.create_all(engine)
+        with Session(engine, expire_on_commit=False) as db:
+            user = self.create_user(db)
+            catch = {
+                "catchId": "gameplay-okun-410g",
+                "fishId": "okun",
+                "weightGrams": 410,
+                "waterId": "canal",
+                "bait": "worms",
+                "method": "stickRod",
+                "depth": "middle",
+                "catchSpotId": "canal_reeds",
+                "caughtAt": "2026-07-17T19:30:00Z",
+            }
+
+            synced_ids, rejected, results = sync_catch_entries_with_results(db, user, [catch, {"catchId": "bad"}])
+            db.commit()
+            self.assertEqual(synced_ids, ["gameplay-okun-410g"])
+            self.assertEqual(rejected, [{"catchId": "bad", "reason": "invalid-catch"}])
+            self.assertEqual(results[0], {"catchId": "gameplay-okun-410g", "status": "inserted"})
+            self.assertEqual(results[1], {"catchId": "bad", "status": "rejected", "reason": "invalid-catch"})
+
+            synced_ids, rejected, results = sync_catch_entries_with_results(db, user, [catch])
+            db.commit()
+            self.assertEqual(synced_ids, ["gameplay-okun-410g"])
+            self.assertEqual(rejected, [])
+            self.assertEqual(results, [{"catchId": "gameplay-okun-410g", "status": "already_exists"}])
+            self.assertEqual(db.query(CatchRecord).count(), 1)
 
 
 if __name__ == "__main__":

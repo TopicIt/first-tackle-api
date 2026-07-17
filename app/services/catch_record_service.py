@@ -42,10 +42,29 @@ def sync_catch_entries(
     source_revision: int | None = None,
     source_updated_at: datetime | None = None,
 ) -> tuple[list[str], list[dict[str, Any]]]:
-    upserted = 0
+    synced_ids, rejected, _results = sync_catch_entries_with_results(
+        db,
+        user,
+        entries,
+        source_revision=source_revision,
+        source_updated_at=source_updated_at,
+    )
+    return synced_ids, rejected
+
+
+def sync_catch_entries_with_results(
+    db: Session,
+    user: User,
+    entries: list[dict[str, Any]],
+    *,
+    source_revision: int | None = None,
+    source_updated_at: datetime | None = None,
+) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]]]:
     synced_ids: list[str] = []
     rejected: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     for entry in dedupe_extracted_entries([entry for entry in entries if isinstance(entry, dict)]):
+        requested_catch_id = normalized_string(entry.get("catchId") or entry.get("id"))
         normalized = normalize_catch_entry(
             user,
             entry,
@@ -53,15 +72,25 @@ def sync_catch_entries(
             source_updated_at=source_updated_at,
         )
         if not normalized:
-            rejected.append({
-                "catchId": normalized_string(entry.get("catchId") or entry.get("id")),
+            rejected_entry = {
+                "catchId": requested_catch_id,
+                "reason": "invalid-catch",
+            }
+            rejected.append(rejected_entry)
+            results.append({
+                "catchId": requested_catch_id,
+                "status": "rejected",
                 "reason": "invalid-catch",
             })
             continue
-        upsert_catch_record(db, normalized)
-        upserted += 1
-        synced_ids.append(normalized["catch_id"] or normalized["catch_key"])
-    return synced_ids, rejected
+        _record, status = upsert_catch_record_with_status(db, normalized)
+        acknowledged_id = normalized["catch_id"] or normalized["catch_key"]
+        synced_ids.append(acknowledged_id)
+        results.append({
+            "catchId": acknowledged_id,
+            "status": status,
+        })
+    return synced_ids, rejected, results
 
 
 def deactivate_user_catch_records(db: Session, user_id: str) -> int:
@@ -163,6 +192,11 @@ def normalize_catch_entry(
 
 
 def upsert_catch_record(db: Session, values: dict[str, Any]) -> CatchRecord:
+    record, _status = upsert_catch_record_with_status(db, values)
+    return record
+
+
+def upsert_catch_record_with_status(db: Session, values: dict[str, Any]) -> tuple[CatchRecord, str]:
     existing = db.scalar(
         select(CatchRecord)
         .where(CatchRecord.user_id == values["user_id"])
@@ -170,13 +204,15 @@ def upsert_catch_record(db: Session, values: dict[str, Any]) -> CatchRecord:
     )
     if existing is None:
         record = CatchRecord(**values, active=True)
+        status = "inserted"
     else:
         record = existing
         for key, value in values.items():
             setattr(record, key, value)
         record.active = True
+        status = "already_exists"
     db.add(record)
-    return record
+    return record, status
 
 
 def is_explicit_reset_payload(payload: dict[str, Any]) -> bool:

@@ -17,6 +17,7 @@ class CatchRecordSyncResponse(BaseModel):
     synced_catch_ids: list[str] = Field(default_factory=list, alias="syncedCatchIds")
     synced_count: int = Field(default=0, alias="syncedCount")
     rejected_count: int = Field(default=0, alias="rejectedCount")
+    results: list[dict[str, Any]] = Field(default_factory=list)
     rejected: list[dict[str, Any]] = Field(default_factory=list)
     server_updated_at: datetime = Field(alias="serverUpdatedAt")
 
