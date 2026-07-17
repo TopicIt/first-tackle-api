@@ -218,9 +218,33 @@ def upsert_catch_record_with_status(db: Session, values: dict[str, Any]) -> tupl
 def is_explicit_reset_payload(payload: dict[str, Any]) -> bool:
     tombstone = payload.get("resetTombstone")
     if isinstance(tombstone, dict) and tombstone.get("resetAt"):
-        return True
+        return not payload_has_catch_progress(payload)
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-    return bool(metadata.get("resetTombstone") or metadata.get("resetAt"))
+    metadata_tombstone = metadata.get("resetTombstone")
+    if isinstance(metadata_tombstone, dict) and metadata_tombstone.get("resetAt"):
+        return not payload_has_catch_progress(payload)
+    if metadata.get("resetAt"):
+        return not payload_has_catch_progress(payload)
+    return False
+
+
+def payload_has_catch_progress(payload: dict[str, Any]) -> bool:
+    if extract_catch_entries(payload):
+        return True
+    profile = payload.get("playerProfile") if isinstance(payload.get("playerProfile"), dict) else {}
+    stats = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
+    if numeric_value(profile.get("fishCaughtTotal")) > 0:
+        return True
+    if numeric_value(stats.get("totalFishCaught") or stats.get("fishCaughtTotal")) > 0:
+        return True
+    journal = payload.get("catchJournal")
+    if isinstance(journal, dict):
+        return any(
+            numeric_value(entry.get("totalCaught")) > 0
+            for entry in journal.values()
+            if isinstance(entry, dict)
+        )
+    return False
 
 
 def is_trophy_record(record: CatchRecord) -> bool:

@@ -106,8 +106,55 @@ class ProfileSaveLeaderboardTests(unittest.TestCase):
 
             db.expire_all()
             user = db.scalar(select(User).where(User.email == "profile-test@example.invalid"))
-            sync_save(db, user, self.save_request(2, force=True, reset=True))
+            sync_save(db, user, SaveSyncRequest(
+                saveVersion=1,
+                revision=2,
+                force=True,
+                payload={
+                    "playerProfile": {"name": "РќРѕРІРµ СѓРєСЂР°С—РЅСЃСЊРєРµ С–Рј'СЏ", "level": 1, "xp": 0},
+                    "fishBasket": [],
+                    "catchHistory": [],
+                    "catchJournal": {},
+                    "stats": {"totalFishCaught": 0},
+                    "resetTombstone": {"resetAt": "2026-07-17T11:00:00Z"},
+                },
+            ))
             self.assertEqual(db.query(CatchRecord).filter(CatchRecord.active.is_(True)).count(), 0)
+
+    def test_stale_reset_tombstone_does_not_delete_new_catch_progress(self):
+        engine = self.make_engine()
+        Base.metadata.create_all(engine)
+        with Session(engine, expire_on_commit=False) as db:
+            user = self.create_user(db, name="Діма 17.07")
+            payload = self.save_request(0, reset=True)
+            payload.payload["playerProfile"]["fishCaughtTotal"] = 20
+            payload.payload["stats"] = {"totalFishCaught": 20}
+            payload.payload["catchJournal"] = {
+                "white_bream": {"totalCaught": 2, "bestWeightGrams": 131},
+            }
+            payload.payload["fishBasket"] = [{
+                "id": "post-reset-white-bream-131",
+                "catchId": "post-reset-white-bream-131",
+                "fishId": "white_bream",
+                "weightGrams": 131,
+                "waterId": "sluice",
+                "bait": "worms",
+                "method": "stickRod",
+                "depth": "bottom",
+                "catchSpotId": "sluice_near_bank",
+                "caughtAtDay": 2,
+                "caughtAtTime": "08:45",
+                "caughtAt": "2026-07-17T19:31:00Z",
+            }]
+
+            sync_save(db, user, payload)
+            board = get_leaderboard(db, "biggest-fish")
+
+            self.assertEqual(board["source"], "server-catch-records")
+            self.assertEqual(board["records"][0]["playerId"], user.id)
+            self.assertEqual(board["records"][0]["fishId"], "white_bream")
+            self.assertEqual(board["records"][0]["weightGrams"], 131)
+            self.assertEqual(db.query(CatchRecord).filter(CatchRecord.active.is_(True)).count(), 1)
 
     def test_leaderboard_keeps_utf8_names_and_readable_labels(self):
         engine = self.make_engine()
