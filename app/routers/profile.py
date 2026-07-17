@@ -27,6 +27,5 @@ def update_me(
         setattr(profile, field, value)
     db.add(profile)
     db.commit()
-    db.refresh(current_user)
+    db.refresh(profile)
     return profile_to_response(current_user)
-

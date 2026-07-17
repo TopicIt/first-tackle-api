@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ProfileResponse(BaseModel):
@@ -27,3 +27,9 @@ class ProfileUpdateRequest(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
+    @field_validator("display_name")
+    @classmethod
+    def validate_display_name(cls, value: str | None) -> str:
+        if value is None or not value.strip():
+            raise ValueError("Display name cannot be empty")
+        return value.strip()

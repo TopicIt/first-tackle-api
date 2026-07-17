@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -5,6 +7,9 @@ from app.models.game_save import GameSave
 from app.models.user import User
 from app.schemas.save import SaveLoadResponse, SaveMetadata, SaveSyncRequest, SaveSyncResponse
 from app.services.catch_record_service import sync_catch_records_from_save
+
+
+logger = logging.getLogger(__name__)
 
 
 def save_metadata(game_save: GameSave | None) -> SaveMetadata:
@@ -44,9 +49,9 @@ def sync_save(db: Session, user: User, payload: SaveSyncRequest) -> SaveSyncResp
             client_updated_at=payload.client_updated_at,
         )
         db.add(game_save)
-        sync_catch_records_from_save(db, user, game_save)
         db.commit()
         db.refresh(game_save)
+        sync_catch_records_best_effort(db, user, game_save)
         return SaveSyncResponse(metadata=save_metadata(game_save))
 
     if payload.revision != game_save.revision and not payload.force:
@@ -66,7 +71,19 @@ def sync_save(db: Session, user: User, payload: SaveSyncRequest) -> SaveSyncResp
     game_save.checksum = payload.checksum
     game_save.client_updated_at = payload.client_updated_at
     db.add(game_save)
-    sync_catch_records_from_save(db, user, game_save)
     db.commit()
     db.refresh(game_save)
+    sync_catch_records_best_effort(db, user, game_save)
     return SaveSyncResponse(metadata=save_metadata(game_save))
+
+
+def sync_catch_records_best_effort(db: Session, user: User, game_save: GameSave) -> None:
+    try:
+        sync_catch_records_from_save(db, user, game_save)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "Cloud save persisted, but catch-record synchronization failed for user %s",
+            user.id,
+        )
