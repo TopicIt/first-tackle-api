@@ -1,5 +1,6 @@
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 os.environ.setdefault("JWT_SECRET", "test-access-secret")
@@ -69,6 +70,19 @@ class ProfileSaveLeaderboardTests(unittest.TestCase):
         with Session(engine, expire_on_commit=False) as db:
             user = self.create_user(db)
             response = sync_save(db, user, self.save_request(0))
+            self.assertEqual(response.metadata.revision, 1)
+            self.assertEqual(db.scalar(select(GameSave.revision)), 1)
+
+    def test_save_survives_non_database_catch_sync_failure(self):
+        engine = self.make_engine()
+        Base.metadata.create_all(engine)
+        with Session(engine, expire_on_commit=False) as db:
+            user = self.create_user(db)
+            with patch(
+                "app.services.save_service.sync_catch_records_from_save",
+                side_effect=RuntimeError("optional catch sync failed"),
+            ):
+                response = sync_save(db, user, self.save_request(0))
             self.assertEqual(response.metadata.revision, 1)
             self.assertEqual(db.scalar(select(GameSave.revision)), 1)
 

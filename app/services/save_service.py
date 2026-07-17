@@ -1,7 +1,6 @@
 import logging
 
 from fastapi import HTTPException, status
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models.game_save import GameSave
@@ -82,7 +81,7 @@ def sync_catch_records_best_effort(db: Session, user: User, game_save: GameSave)
     try:
         sync_catch_records_from_save(db, user, game_save)
         db.commit()
-    except SQLAlchemyError:
+    except Exception:
         db.rollback()
         logger.exception(
             "Cloud save persisted, but catch-record synchronization failed for user %s",
