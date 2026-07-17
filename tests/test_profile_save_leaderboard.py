@@ -1,0 +1,99 @@
+import os
+import unittest
+
+os.environ.setdefault("DATABASE_URL", "sqlite://")
+os.environ.setdefault("JWT_SECRET", "test-access-secret")
+os.environ.setdefault("JWT_REFRESH_SECRET", "test-refresh-secret")
+
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
+
+from app.core.database import Base
+from app.models.catch_record import CatchRecord
+from app.models.game_save import GameSave
+from app.models.profile import PlayerProfile
+from app.models.user import User
+from app.schemas.profile import ProfileUpdateRequest
+from app.schemas.save import SaveSyncRequest
+from app.services.leaderboard_service import get_leaderboard
+from app.services.save_service import sync_save
+
+
+class ProfileSaveLeaderboardTests(unittest.TestCase):
+    def make_engine(self):
+        return create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+
+    def create_user(self, db: Session, name: str = "Старе ім'я") -> User:
+        user = User(email="profile-test@example.invalid", password_hash="test")
+        user.profile = PlayerProfile(display_name=name, language="uk")
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        return user
+
+    def save_request(self, revision: int, *, force: bool = False, reset: bool = False) -> SaveSyncRequest:
+        payload = {
+            "playerProfile": {"name": "Старе ім'я", "level": 4, "xp": 120},
+            "fishBasket": [{
+                "id": "catch-stable-1",
+                "fishId": "carp",
+                "weightGrams": 1450,
+                "waterId": "greada",
+                "caughtAt": "2026-07-17T10:00:00Z",
+            }],
+        }
+        if reset:
+            payload["resetTombstone"] = {"resetAt": "2026-07-17T11:00:00Z"}
+        return SaveSyncRequest(
+            saveVersion=1,
+            revision=revision,
+            force=force,
+            payload=payload,
+        )
+
+    def test_profile_name_is_trimmed_and_empty_name_is_rejected(self):
+        self.assertEqual(ProfileUpdateRequest(displayName="  Нове ім'я  ").display_name, "Нове ім'я")
+        with self.assertRaises(ValueError):
+            ProfileUpdateRequest(displayName="   ")
+
+    def test_save_survives_when_catch_record_table_is_missing(self):
+        engine = self.make_engine()
+        User.__table__.create(engine)
+        PlayerProfile.__table__.create(engine)
+        GameSave.__table__.create(engine)
+        with Session(engine, expire_on_commit=False) as db:
+            user = self.create_user(db)
+            response = sync_save(db, user, self.save_request(0))
+            self.assertEqual(response.metadata.revision, 1)
+            self.assertEqual(db.scalar(select(GameSave.revision)), 1)
+
+    def test_rename_overlays_existing_deduped_catch_records(self):
+        engine = self.make_engine()
+        Base.metadata.create_all(engine)
+        with Session(engine, expire_on_commit=False) as db:
+            user = self.create_user(db)
+            sync_save(db, user, self.save_request(0))
+            db.expire_all()
+            user = db.scalar(select(User).where(User.email == "profile-test@example.invalid"))
+            sync_save(db, user, self.save_request(1, force=True))
+            self.assertEqual(db.query(CatchRecord).count(), 1)
+
+            user.profile.display_name = "Нове українське ім'я"
+            db.commit()
+            board = get_leaderboard(db, "biggest-fish")
+            self.assertEqual(board["source"], "server-catch-records")
+            self.assertEqual(board["records"][0]["playerName"], "Нове українське ім'я")
+
+            db.expire_all()
+            user = db.scalar(select(User).where(User.email == "profile-test@example.invalid"))
+            sync_save(db, user, self.save_request(2, force=True, reset=True))
+            self.assertEqual(db.query(CatchRecord).filter(CatchRecord.active.is_(True)).count(), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
