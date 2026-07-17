@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload
 
 from app.models.catch_record import CatchRecord
@@ -18,26 +19,27 @@ TROPHY_CATEGORIES = {"trophy", "very_rare", "legendary"}
 def get_leaderboard(db: Session, board_type: str, *, fish_id: str | None = None) -> dict[str, Any]:
     normalized_type = normalize_board_type(board_type)
     saves = load_saves(db)
-    backfill_catch_records(db, saves)
+    source = "server-cloud-save"
+    message = "Server leaderboard aggregated from latest cloud saves; records are not anti-cheat verified yet."
 
     if normalized_type == "trophies":
-        rows = trophy_rows(load_catch_records(db))
+        rows, source, message = persistent_or_legacy_trophy_rows(db, saves)
     elif normalized_type in {"coins", "total-coins"}:
         rows = score_rows(saves, "coins")
     elif normalized_type in {"total-fish", "fish-caught"}:
         rows = score_rows(saves, "total-fish")
     elif normalized_type == "by-location":
-        rows = fish_rows(load_catch_records(db))
+        rows, source, message = persistent_or_legacy_fish_rows(db, saves)
     else:
-        rows = fish_rows(load_catch_records(db), fish_id=fish_id)
+        rows, source, message = persistent_or_legacy_fish_rows(db, saves, fish_id=fish_id)
 
     ranked_rows = add_ranks(rows[:LEADERBOARD_LIMIT])
     return {
         "ok": True,
         "type": f"species/{fish_id}/biggest" if fish_id else normalized_type,
-        "source": "server-catch-records" if normalized_type in {"biggest-fish", "by-location", "trophies"} else "server-cloud-save",
+        "source": source,
         "verified": False,
-        "message": "Server leaderboard uses persistent catch records; records are not anti-cheat verified yet.",
+        "message": message,
         "records": ranked_rows,
         "rows": ranked_rows,
     }
@@ -82,6 +84,26 @@ def backfill_catch_records(db: Session, saves: list[GameSave]) -> None:
         db.commit()
 
 
+def persistent_or_legacy_fish_rows(db: Session, saves: list[GameSave], *, fish_id: str | None = None) -> tuple[list[dict[str, Any]], str, str]:
+    try:
+        backfill_catch_records(db, saves)
+        rows = fish_rows(load_catch_records(db), fish_id=fish_id)
+        return rows, "server-catch-records", "Server leaderboard uses persistent catch records; records are not anti-cheat verified yet."
+    except SQLAlchemyError:
+        db.rollback()
+        return legacy_fish_rows(saves, fish_id=fish_id), "server-cloud-save", "Persistent catch records are unavailable; leaderboard fell back to latest cloud saves."
+
+
+def persistent_or_legacy_trophy_rows(db: Session, saves: list[GameSave]) -> tuple[list[dict[str, Any]], str, str]:
+    try:
+        backfill_catch_records(db, saves)
+        rows = trophy_rows(load_catch_records(db))
+        return rows, "server-catch-records", "Server leaderboard uses persistent catch records; records are not anti-cheat verified yet."
+    except SQLAlchemyError:
+        db.rollback()
+        return legacy_trophy_rows(saves), "server-cloud-save", "Persistent catch records are unavailable; leaderboard fell back to latest cloud saves."
+
+
 def fish_rows(records: list[CatchRecord], *, fish_id: str | None = None) -> list[dict[str, Any]]:
     rows = [
         catch_record_row(record)
@@ -95,6 +117,24 @@ def fish_rows(records: list[CatchRecord], *, fish_id: str | None = None) -> list
     )
 
 
+def legacy_fish_rows(saves: list[GameSave], *, fish_id: str | None = None) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for save in saves:
+        payload = save.payload_json if isinstance(save.payload_json, dict) else {}
+        player_name = player_name_for_save(save, payload)
+        rows.extend(fish_entry_row(save, player_name, entry) for entry in payload_fish_entries(payload, fish_id=fish_id))
+
+        biggest = payload.get("stats", {}).get("biggestFish")
+        if isinstance(biggest, dict) and (fish_id is None or biggest.get("fishId") == fish_id):
+            rows.append(biggest_fish_row(save, player_name, biggest))
+
+    return sorted(
+        dedupe_rows(rows),
+        key=lambda row: (row.get("weightGrams") or 0, row.get("serverRevision") or 0),
+        reverse=True,
+    )
+
+
 def trophy_rows(records: list[CatchRecord]) -> list[dict[str, Any]]:
     rows = trophy_group_rows(records)
     return sorted(
@@ -104,6 +144,24 @@ def trophy_rows(records: list[CatchRecord]) -> list[dict[str, Any]]:
             row.get("bestTrophyWeightGrams") or row.get("weightGrams") or 0,
             row.get("serverRevision") or 0,
         ),
+        reverse=True,
+    )
+
+
+def legacy_trophy_rows(saves: list[GameSave]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for save in saves:
+        payload = save.payload_json if isinstance(save.payload_json, dict) else {}
+        player_name = player_name_for_save(save, payload)
+        for entry in payload_trophy_entries(payload):
+            row = fish_entry_row(save, player_name, entry)
+            row["trophyCount"] = 1
+            row["trophies"] = 1
+            row["realTrophy"] = True
+            rows.append(row)
+    return sorted(
+        dedupe_rows(rows),
+        key=lambda row: (row.get("weightGrams") or 0, row.get("serverRevision") or 0),
         reverse=True,
     )
 
